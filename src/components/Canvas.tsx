@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ReactFlow, Background, BackgroundVariant, Controls, addEdge, useEdgesState, useNodesState, Handle, Position, type Connection, type Node, type Edge, ReactFlowProvider, useReactFlow } from "@xyflow/react";
 import { BLOCKS, Logo } from "./Logo";
 import { BLOCK_FIELDS, summarize } from "./blockConfig";
@@ -38,11 +38,27 @@ const STARTER: { nodes: Node<BlockData>[]; edges: Edge[] } = {
   ],
 };
 
-function Inner({ onCompile }: { onCompile: (description: string) => void }) {
+export type CanvasGraph = { nodes: Node<BlockData>[]; edges: Edge[]; key: number; status?: string };
+
+function Inner({ onCompile, graph }: { onCompile: (description: string) => void; graph?: CanvasGraph }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<BlockData>>(STARTER.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(STARTER.edges);
   const wrap = useRef<HTMLDivElement>(null);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  useEffect(() => {
+    if (!graph?.nodes?.length) return;
+    setNodes(graph.nodes); setEdges(graph.edges);
+    setTimeout(() => fitView({ padding: 0.15, duration: 300 }), 80);
+    setTimeout(() => fitView({ padding: 0.15, duration: 300 }), 700);  // refit after the run panel narrows the canvas
+  }, [graph?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Keep the whole workflow in view when side panels open or close.
+  useEffect(() => {
+    if (!wrap.current) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => fitView({ padding: 0.15, duration: 250 }), 150); });
+    ro.observe(wrap.current);
+    return () => { ro.disconnect(); clearTimeout(t); };
+  }, [fitView]);
   const onConnect = useCallback((c: Connection) => setEdges((e) => addEdge({ ...c, animated: true }, e)), [setEdges]);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -78,10 +94,11 @@ function Inner({ onCompile }: { onCompile: (description: string) => void }) {
       </aside>
       <div ref={wrap} className="flex-1 relative" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
         <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} nodeTypes={nodeTypes}
-          onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)} fitView defaultEdgeOptions={{ animated: true, style: { stroke: "#8a93a3" } }}>
+          onNodeClick={(_, n) => setSelected(n.id)} onPaneClick={() => setSelected(null)} fitView minZoom={0.2} defaultEdgeOptions={{ animated: true, style: { stroke: "#8a93a3" } }}>
           <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} color="#c4cad3" bgColor="#f6f7f9" />
           <Controls position="top-left" showInteractive={false} />
         </ReactFlow>
+        {graph?.status && <div className="absolute top-3 left-14 px-3 py-1.5 rounded-md bg-white border border-line text-[12.5px] text-graphite shadow-sm">{graph.status}</div>}
         <div className="absolute top-3 right-3 flex gap-2">
           <button onClick={() => { setNodes([]); setEdges([]); }} className="px-3 py-1.5 rounded-md border border-line bg-white text-[13px] hover:bg-paper">Clear</button>
           <button onClick={compile} className="px-3 py-1.5 rounded-md bg-cobalt text-white text-[13px] font-medium hover:brightness-110">Build this workflow</button>
@@ -119,6 +136,6 @@ function Inner({ onCompile }: { onCompile: (description: string) => void }) {
   );
 }
 
-export default function Canvas(props: { onCompile: (d: string) => void }) {
+export default function Canvas(props: { onCompile: (d: string) => void; graph?: CanvasGraph }) {
   return <ReactFlowProvider><Inner {...props} /></ReactFlowProvider>;
 }

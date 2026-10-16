@@ -18,7 +18,7 @@ const SUGGESTIONS = [
   { command: "/onboarding", prompt: "An employee onboarding tracker with checklists per team and owners." },
 ];
 
-export default function CommandBar({ tools, onRun, onOpenTool, busy, seed }: { tools: Tool[]; onRun: (prompt: string, command?: string) => void; onOpenTool: (t: Tool) => void; busy: boolean; seed?: string }) {
+export default function CommandBar({ tools, onRun, onOpenTool, busy, seed, onDraft }: { tools: Tool[]; onRun: (prompt: string, command?: string) => void; onOpenTool: (t: Tool) => void; busy: boolean; seed?: string; onDraft?: (prompt: string) => void }) {
   const [text, setText] = useState("");
   const [focus, setFocus] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -68,7 +68,10 @@ export default function CommandBar({ tools, onRun, onOpenTool, busy, seed }: { t
         <Slash size={16} className="text-graphite mb-2" />
         <textarea ref={ref} rows={1} value={text} onChange={(e) => setText(e.target.value)} onFocus={() => setFocus(true)} onBlur={() => setFocus(false)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
+          onPaste={(e) => { const t = e.clipboardData.getData("text"); if (t && !t.trim().startsWith("/") && t.trim().split(/\s+/).length > 6) onDraft?.(t.trim()); }}
           placeholder="Describe a tool, or type / to run a saved command" className="flex-1 resize-none outline-none text-[14px] py-1.5 max-h-40 bg-transparent" />
+        <button onClick={() => { const t = text.trim(); if (t && !t.startsWith("/")) onDraft?.(t); }} disabled={!text.trim() || text.trim().startsWith("/")}
+          className="h-8 px-3 rounded-lg border border-line text-[12.5px] text-graphite hover:text-ink disabled:opacity-30">Draw</button>
         <button onClick={submit} disabled={busy || !text.trim()} aria-label="Build" className="h-8 w-8 rounded-lg bg-ink text-white flex items-center justify-center disabled:opacity-30"><ArrowUp size={16} /></button>
       </div>
     </div>

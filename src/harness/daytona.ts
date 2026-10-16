@@ -88,10 +88,22 @@ export async function createToolSandbox(opts: { slug: string; dbName: string; su
   return { sandbox, secretMode, firewall };
 }
 
-export async function retireToolSandboxes(slug: string) {
+/** Free quota held by sandboxes that no registered /command uses (failed runs, abandoned builds).
+ *  The live version of the tool being rebuilt is kept until the new one is registered (blue/green). */
+export async function retireToolSandboxes(_slug: string) {
   try {
-    for await (const s of daytona().list({ labels: { app: "vibeflow", tool: slug } } as any)) await s.delete().catch(() => {});
+    const { sqlOne } = await import("./surreal");
+    const keep = new Set((await sqlOne<string[]>(`SELECT VALUE sandbox FROM tool`).catch(() => [])) ?? []);
+    for await (const s of daytona().list({ labels: { app: "vibeflow" } } as any) as AsyncIterable<Sandbox>) {
+      if (!keep.has(s.id)) await s.delete().catch(() => {});
+    }
   } catch { /* best effort */ }
+}
+
+/** After the new version is registered, delete the previous version's sandbox. */
+export async function deleteSandbox(id?: string) {
+  if (!id) return;
+  try { const s = await daytona().get(id); await s.delete(); } catch { /* already gone */ }
 }
 
 export async function getSandbox(id: string) { return daytona().get(id); }

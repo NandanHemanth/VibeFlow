@@ -1,8 +1,9 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { CanvasGraph } from "@/components/Canvas";
 import dynamic from "next/dynamic";
 import { Hammer, LayoutGrid, Workflow, Brain, Share2, ShieldCheck, X, ExternalLink, Database } from "lucide-react";
-import CommandBar, { type Tool } from "@/components/CommandBar";
+import CommandBar, { type Tool, DEMO } from "@/components/CommandBar";
 import RunPanel, { useRun } from "@/components/RunPanel";
 import HarnessView from "@/components/HarnessView";
 import MemoryView from "@/components/MemoryView";
@@ -22,6 +23,23 @@ const NAV: { id: View; label: string; icon: any }[] = [
   { id: "security", label: "Security", icon: ShieldCheck },
 ];
 
+// Fixed layout for the demo prompt so the canvas never depends on a model call on camera.
+const N = (id: string, kind: string, label: string, note: string, x: number, y: number, config: Record<string, string>) =>
+  ({ id, type: "block", position: { x, y }, data: { kind, label, note, config } });
+const DEMO_GRAPH = {
+  nodes: [
+    N("d1", "trigger.form", "Discount request", "AE submits deal, discount %, justification", 0, 160, { form: "Discount request", fields: "deal, discount %, justification", who: "Sales" }),
+    N("d2", "ai.graph", "Company graph", "Walk org chart: AE → manager → VP → CFO", 240, 40, { start: "Deal", walk: "deal <-owns<- person ->reports_to-> manager", depth: "3" }),
+    N("d3", "ai.memory", "Agent Memory", "Current discount policy + past decisions for the account", 240, 290, { mode: "Recall", layer: "All", lens: "org/acme", asOf: "now (and 45 days ago)" }),
+    N("d4", "ai.agent", "LLM agent", "Pick approver, flag margin-floor breach, cite precedent", 480, 160, { task: "Route by policy tier, summarize precedent", model: "Auto (router)", output: "Decision (approve / reject / escalate)" }),
+    N("d5", "logic.approval", "Approval", "Approver decides with a required reason", 720, 160, { approver: "Walk org chart by policy", rule: "discount > 25% → CFO", sla: "24", reason: "Yes" }),
+    N("d6", "ui.app", "Internal tool UI", "Deal desk approval inbox + audit log", 960, 40, { kind: "Approval inbox", command: "/dealdesk", audience: "Sales managers, VP Sales, CFO" }),
+    N("d7", "app.slack", "Slack", "Notify approver and the AE", 960, 200, { action: "Post message", channel: "#all-moss", message: "{{deal}} needs {{approver}} ({{discount}}%)" }),
+    N("d8", "app.jira", "Jira", "Change record for every decision", 960, 350, { project: "PLAT", type: "Task", summary: "Deal desk decision: {{deal}}" }),
+  ],
+  edges: [["d1", "d2"], ["d1", "d3"], ["d2", "d4"], ["d3", "d4"], ["d4", "d5"], ["d5", "d6"], ["d5", "d7"], ["d5", "d8"]].map(([a, b], i) => ({ id: `de${i}`, source: a, target: b, animated: true })),
+};
+
 export default function Home() {
   const [view, setView] = useState<View>("build");
   const [tools, setTools] = useState<Tool[]>([]);
@@ -29,6 +47,17 @@ export default function Home() {
   const [openTool, setOpenTool] = useState<Tool | null>(null);
   const [seedText, setSeedText] = useState<string>();
   const [setup, setSetup] = useState<string>("");
+  const [graph, setGraph] = useState<CanvasGraph>();
+  const lastDraft = useRef("");
+  const draft = async (prompt: string) => {
+    if (!prompt || prompt === lastDraft.current) return;
+    lastDraft.current = prompt;
+    setView("build"); setOpenTool(null);
+    setGraph((g) => ({ nodes: g?.nodes ?? [], edges: g?.edges ?? [], key: g?.key ?? 0, status: "Drawing the workflow from your prompt…" }));
+    const r = await fetch("/api/canvas", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt }) }).then((r) => r.json()).catch(() => null);
+    if (r?.nodes?.length) setGraph({ nodes: r.nodes, edges: r.edges, key: Date.now(), status: `Drafted ${r.nodes.length} steps · click any block to edit its settings` });
+    else { lastDraft.current = ""; setGraph((g) => ({ nodes: g?.nodes ?? [], edges: g?.edges ?? [], key: g?.key ?? 0, status: "Couldn't draw this one. Press Draw to try again, or drag blocks in." })); }
+  };
   const events = useRun(runId);
   const done = events.find((e) => e.step === "done");
   const busy = !!runId && !done;
@@ -39,6 +68,8 @@ export default function Home() {
 
   const run = async (prompt: string, command?: string) => {
     setOpenTool(null);
+    if (prompt === DEMO.prompt) { lastDraft.current = prompt; setView("build"); setGraph({ ...DEMO_GRAPH, key: Date.now(), status: "Deal Desk workflow · click any block to see its settings" }); }
+    else draft(prompt);  // every build also draws its workflow on the canvas
     const r = await fetch("/api/run", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt, command }) }).then((r) => r.json());
     setRunId(r.id);
   };
@@ -85,7 +116,7 @@ export default function Home() {
               </div>
               <iframe src={openTool.url} className="flex-1 w-full bg-white" title={openTool.name} />
             </div>
-          ) : view === "build" ? <Canvas onCompile={(d) => setSeedText(d)} />
+          ) : view === "build" ? <Canvas onCompile={(d) => setSeedText(d)} graph={graph} />
             : view === "tools" ? <ToolsView tools={tools} onOpen={setOpenTool} />
             : view === "harness" ? <HarnessView events={events} />
             : view === "memory" ? <MemoryView />
@@ -94,7 +125,7 @@ export default function Home() {
         </div>
         {(view === "build" || openTool) && (
           <div className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[min(760px,90%)]">
-            <CommandBar tools={tools} onRun={run} onOpenTool={setOpenTool} busy={busy} seed={seedText} />
+            <CommandBar tools={tools} onRun={run} onOpenTool={setOpenTool} busy={busy} seed={seedText} onDraft={draft} />
           </div>
         )}
       </main>

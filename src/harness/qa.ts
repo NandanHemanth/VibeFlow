@@ -33,6 +33,8 @@ export async function anchorQa(url: string, run: string, previewToken?: string) 
     await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {});
     await page.goto(url, { waitUntil: "networkidle", timeout: 45000 });
     await page.waitForTimeout(2500);
+    const bodyText = (await page.locator("body").innerText().catch(() => "")).trim();
+    if (bodyText.includes("VibeFlow tool runtime ready") || bodyText.length < 40) errors.push("Blank page: the generated tool rendered no content (starter template or empty App)");
     const buf = await page.screenshot({ type: "png" });
     const dir = path.join(process.cwd(), "public", "shots");
     await mkdir(dir, { recursive: true });

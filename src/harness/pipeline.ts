@@ -55,6 +55,16 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
   const t0 = Date.now();
   const command = commandHint ? (commandHint.startsWith("/") ? commandHint : "/" + commandHint) : undefined;
   let slug = slugify(command ?? prompt.split(/\s+/).slice(0, 3).join("-"));
+  let namedCommand: string | undefined;
+  if (!command) {
+    // Name the tool from the request itself, so memory about other tools can't hijack what gets built.
+    const existing = await sqlOne<any[]>(`SELECT VALUE command FROM tool`).catch(() => []);
+    const r = await complete("fast", [
+      { role: "system", content: `Name the internal tool or workflow this request describes. Return ONLY JSON like {"command":"/support-triage","name":"Support Triage"} (examples: /lead-scoring, /payment-alerts, /onboarding, /data-analysis). 1-3 words from the request's own subject. Must not be one of: ${(existing ?? []).join(", ")}.` },
+      { role: "user", content: prompt },
+    ], { json: true, maxTokens: 400 }).catch(() => null);
+    try { const j = r ? extractJson<{ command: string }>(r.text) : null; const c = slugify(j?.command ?? ""); if (c && !/kebab|short|example|tool-name/.test(c)) { namedCommand = "/" + c; slug = c; } } catch { /* keep word slug */ }
+  }
 
   // ---- 1. Episodic: open a session for this run (shared by all agents) ----
   let session: string | null = null;
@@ -119,13 +129,12 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
     if (cached?.spec) return cached.spec as Spec;
     const r = await complete("plan", [
       { role: "system", content: PLANNER_SYSTEM },
-      { role: "user", content: `REQUEST: ${prompt}\nCOMMAND: ${command ?? "(choose one)"}\n\nCOMPANY KNOWLEDGE GRAPH:\n${ctx.kg.text}\n\nSEMANTIC MEMORY (current facts; superseded facts are excluded):\n${ctx.semantic || "(none)"}\n\nPROCEDURAL MEMORY (recipes that passed QA before):\n${JSON.stringify(ctx.procs)}\n\nRECENT EPISODES:\n${JSON.stringify(ctx.episodes)}\n\nWHAT WE BELIEVED ON ${ctx.asOfThen.slice(0, 10)} (superseded where it differs from current facts — never use superseded values):\n${ctx.thenFacts.join("\n") || "(none)"}` },
+      { role: "user", content: `REQUEST (this is what to build): ${prompt}\nCOMMAND: ${command ?? namedCommand ?? "(choose one)"}\nEXISTING TOOLS (do not rebuild these unless the request names them): ${JSON.stringify(await sqlOne<any[]>(`SELECT command, name FROM tool`).catch(() => []))}\n\nCOMPANY KNOWLEDGE GRAPH:\n${ctx.kg.text}\n\nSEMANTIC MEMORY (current facts; superseded facts are excluded):\n${ctx.semantic || "(none)"}\n\nPROCEDURAL MEMORY (recipes that passed QA before):\n${JSON.stringify(ctx.procs)}\n\nRECENT EPISODES:\n${JSON.stringify(ctx.episodes)}\n\nWHAT WE BELIEVED ON ${ctx.asOfThen.slice(0, 10)} (superseded where it differs from current facts — never use superseded values):\n${ctx.thenFacts.join("\n") || "(none)"}` },
     ], { json: true, maxTokens: 6000, onProgress: (n, m) => { emit({ run, step: "plan", status: "log", agent: "planner", title: "planning", detail: `${m} · ${Math.round(n / 4)} tokens` }); } });
     const s = extractJson<Spec>(r.text);
     (s as any)._model = `${r.provider}/${r.model}`;
     return s;
   }, (s) => ({ detail: `${s.name} · ${s.tables.map((t) => t.name).join(", ")} · ${s.views.length} views · ${s.rules.length} rules`, data: { spec: s } }));
-  if (!command && spec.command) slug = slugify(spec.command);
   spec.slug = slug; spec.command = command ?? "/" + slug;
   await say("planner", `Planned ${spec.name}: ${spec.summary}. Rules: ${spec.rules.join("; ")}`);
   if (vec && !cached) await sql(`CREATE cache CONTENT { prompt: $p, spec: $s, embedding: $v }`, { p: prompt, s: spec, v: vec }).catch(() => {});
@@ -156,11 +165,19 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
   const contextJson = JSON.stringify({ company: { name: companyRow?.name ?? "Acme Robotics", industry: companyRow?.industry ?? "" }, brand: { primary: spec.brand?.primary ?? companyRow?.brand?.primary ?? "#4F46E5" }, rules: spec.rules ?? [], spec }, null, 2);
   const prior = await sqlOne<any>(`SELECT code, recipe FROM ONLY type::record("procedure", $k)`, { k: slug }).catch(() => null);
   let code = await step(run, "codegen", "builder", prior?.code ? "Builder updates the last version that passed QA" : "Builder writes the tool (src/App.tsx)", async () => {
+    const valid = (c: string) => c.split("\n").length > 40 && /export\s+default/.test(c) && !c.includes("VibeFlow tool runtime ready");
+    let best = { code: "", model: "" };
+    for (let attempt = 1; attempt <= 3; attempt++) {
     const r = await complete("code", [
       { role: "system", content: BUILDER_SYSTEM },
       { role: "user", content: `${prior?.code ? `PROCEDURAL MEMORY — the previous version of this tool passed build + browser QA. Keep its structure and style, and update it to match the SPEC (current facts win):\n\`\`\`tsx\n${prior.code}\n\`\`\`\n\n` : ""}SPEC:\n${JSON.stringify(spec, null, 2)}\n\nCOMPANY CONTEXT:\n${ctx.kg.text.slice(0, 6000)}\n\nPROCEDURES THAT WORKED:\n${JSON.stringify(ctx.procs.map((p: any) => p.recipe))}` },
     ], { maxTokens: 12000, temperature: 0.3, onProgress: (n, m) => { emit({ run, step: "codegen", status: "log", agent: "builder", title: "writing", detail: `${m} · ${Math.round(n / 4)} tokens written` }); } });
-    return { code: extractCode(r.text), model: `${r.provider}/${r.model}` };
+    const c = extractCode(r.text);
+    if (valid(c)) return { code: c, model: `${r.provider}/${r.model}` };
+    if (c.length > best.code.length) best = { code: c, model: `${r.provider}/${r.model}` };
+    await emit({ run, step: "codegen", status: "log", agent: "builder", title: "retry", detail: `attempt ${attempt}: incomplete file (${c.split("\n").length} lines), retrying` });
+    }
+    throw new Error(`Builder returned an incomplete file ${best.code.split("\n").length} lines after 3 attempts`);
   }, (r) => ({ detail: `${r.code.split("\n").length} lines via ${r.model}` })).then((r) => r.code);
   await dt.writeFiles(sandbox, { "src/App.tsx": code, "public/context.json": contextJson });
 
@@ -215,6 +232,7 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
     if (memoryEnabled()) await memory.remember(`Policy simulation of ${spec.name}: ${sim.summary} Policy findings: ${(sim.policy_findings ?? []).join("; ")}. Recommendations: ${(sim.recommendations ?? []).join("; ")}.`, SCOPES.tool(slug)).catch(() => {});
   }
 
+  const previousSandbox = await sqlOne<string | null>(`SELECT VALUE sandbox FROM ONLY type::record("tool", $slug)`, { slug }).catch(() => null);
   // ---- 11. Register slash command (tool registry in SurrealDB graph) ----
   await step(run, "register", "curator", `Register ${spec.command}`, async () => {
     await sql(`
@@ -224,6 +242,8 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
       RELATE company:acme->uses_tool->(type::record("tool", $slug));
     `, { slug, name: spec.name, cmd: spec.command, sum: spec.summary, sb: sandbox.id, url, db: dbName, sha, spec, run, qa: qa.summary, sm: secretMode, fw: firewall });
   }, () => ({ detail: `${spec.command} → ${spec.name}` }));
+  // Blue/green: the previous version kept serving until now; retire it only after the new one is registered.
+  if (previousSandbox && previousSandbox !== sandbox.id) await dt.deleteSandbox(previousSandbox);
 
   // ---- 11b. Notify the company: Slack announcement + Jira change record ----
   const notify = await step(run, "notify", "curator", "Announce in Slack and log a Jira change record", async () => {
@@ -246,7 +266,7 @@ async function runHarness(run: string, prompt: string, commandHint?: string) {
     const recipe = `For ${spec.name}: tables ${spec.tables.map((t) => t.name).join("/")}; views: ${spec.views.join("; ")}; build passed in ${attempts} attempt(s).`;
     await sql(`
       UPSERT type::record("procedure", $k) MERGE { name: $name, kind: "internal-tool", recipe: $recipe, last_run: $run };
-      IF $ok { UPDATE type::record("procedure", $k) SET successes += 1, code = $code } ELSE { UPDATE type::record("procedure", $k) SET failures += 1 };
+      IF $ok AND string::len($code) > 2000 { UPDATE type::record("procedure", $k) SET successes += 1, code = $code } ELSE IF $ok { UPDATE type::record("procedure", $k) SET successes += 1 } ELSE { UPDATE type::record("procedure", $k) SET failures += 1 };
       RELATE (type::record("tool", $slug))->built_with->(type::record("procedure", $k));
       CREATE episode SET kind = "build", summary = $ep, run = $run, source = "harness";
     `, { k: slug, ok: qa.ok, code, name: `Build ${spec.name}`, recipe, run, slug, ep: `Built ${spec.command} (${spec.name}) in ${Math.round((Date.now() - t0) / 1000)}s, ${attempts} build attempt(s), QA: ${qa.summary}` });

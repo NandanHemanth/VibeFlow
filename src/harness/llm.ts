@@ -1,6 +1,7 @@
 // Model router: picks provider+model per task role, falls through a chain on failure.
 // Primary: NVIDIA NIM (free). Secondary: Gemini (OpenAI-compatible). Fallback: OpenRouter free models.
 import OpenAI from "openai";
+import { jsonrepair } from "jsonrepair";
 import { env } from "@/lib/env";
 
 export type Role = "plan" | "code" | "fast" | "judge";
@@ -92,7 +93,9 @@ export function extractJson<T = unknown>(text: string): T {
   const raw = fenced ? fenced[1] : text;
   const start = raw.search(/[\[{]/);
   const end = Math.max(raw.lastIndexOf("}"), raw.lastIndexOf("]"));
-  return JSON.parse(raw.slice(start, end + 1)) as T;
+  const body = start >= 0 ? raw.slice(start, end > start ? end + 1 : undefined) : raw;
+  try { return JSON.parse(body) as T; } catch { /* small models often emit almost-JSON */ }
+  return JSON.parse(jsonrepair(start >= 0 ? raw.slice(start) : raw)) as T;
 }
 
 export function extractCode(text: string, lang = "tsx"): string {
