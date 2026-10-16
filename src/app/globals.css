@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #161a22;
+  --graphite: #5a6371;
+  --line: #e2e5ea;
+  --dot: #cdd2da;
+  --cobalt: #2f5bea;      /* semantic memory + primary actions */
+  --teal: #0f8b8d;        /* episodic memory */
+  --amber: #b7791f;       /* procedural memory */
+  --plum: #7a4fd6;        /* knowledge graph */
+  --rose: #c2415b;        /* errors / security alerts */
+  --moss: #2f855a;        /* success */
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-graphite: var(--graphite);
+  --color-line: var(--line);
+  --color-cobalt: var(--cobalt);
+  --color-teal: var(--teal);
+  --color-amber: var(--amber);
+  --color-plum: var(--plum);
+  --color-rose: var(--rose);
+  --color-moss: var(--moss);
+  --font-sans: var(--font-plex);
+  --font-mono: var(--font-plex-mono);
+}
+
+html, body { background: var(--paper); color: var(--ink); font-family: var(--font-plex), ui-sans-serif, system-ui; font-size: 14px; }
+.dotgrid { background-color: var(--paper); background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 18px 18px; }
+:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 2px; }
+@keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 rgba(47,91,234,.35); } 100% { box-shadow: 0 0 0 10px rgba(47,91,234,0); } }
+.live-step { animation: pulse-ring 1.4s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .live-step { animation: none; } }
